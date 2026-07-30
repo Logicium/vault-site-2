@@ -5,9 +5,10 @@
  * v-model holds the image URL string. (Paste-URL entry was removed so every
  * image goes through a real upload — no stray external hotlinks.)
  */
-import { ref } from 'vue'
-import { ImagePlus } from 'lucide-vue-next'
+import { ref, watch } from 'vue'
+import { ImagePlus, ImageOff } from 'lucide-vue-next'
 import { contentClient } from '../../../platform/contentClient'
+import { optimizeImage } from '../../../platform/imageOptimize'
 
 const props = withDefaults(defineProps<{
   label?: string
@@ -26,23 +27,18 @@ const uploading = ref(false)
 const error = ref<string | null>(null)
 const dragging = ref(false)
 const fileEl = ref<HTMLInputElement | null>(null)
-
-function readAsDataUrl(file: Blob): Promise<string> {
-  return new Promise((res, rej) => {
-    const fr = new FileReader()
-    fr.onload = () => res(fr.result as string)
-    fr.onerror = rej
-    fr.readAsDataURL(file)
-  })
-}
+/* A src that 404s (seed paths, deleted media) must never show the browser's
+   broken-image glyph — swap to a quiet placeholder instead. */
+const loadFailed = ref(false)
+watch(model, () => { loadFailed.value = false })
 
 async function upload(file: File) {
-  if (!file.type.startsWith('image/')) { error.value = 'Please choose an image file.'; return }
   uploading.value = true
   error.value = null
   try {
-    const dataUrl = await readAsDataUrl(file)
-    const r = await contentClient.uploadMedia(props.siteId, file.name, file.type, dataUrl.split(',')[1] ?? '')
+    // Downscale + WebP re-encode (when it wins) + size validation, all client-side.
+    const opt = await optimizeImage(file)
+    const r = await contentClient.uploadMedia(props.siteId, opt.filename, opt.contentType, opt.base64)
     model.value = r.url
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -76,7 +72,11 @@ function onDrop(evt: DragEvent) {
     >
       <template v-if="model">
         <div class="ai-img__preview" :style="{ aspectRatio: aspect }">
-          <img :src="model" alt="" loading="lazy" />
+          <div v-if="loadFailed" class="ai-img__missing">
+            <ImageOff :size="18" />
+            <span>No photo yet</span>
+          </div>
+          <img v-else :src="model" alt="" loading="lazy" @error="loadFailed = true" />
         </div>
         <div class="ai-img__actions" @click.stop>
           <button type="button" class="ai-img__chip" @click="fileEl?.click()"><ImagePlus :size="12" /> Replace</button>
@@ -94,3 +94,17 @@ function onDrop(evt: DragEvent) {
     <span v-else-if="hint" class="ai-hint">{{ hint }}</span>
   </div>
 </template>
+
+<style scoped>
+.ai-img__missing {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 0.4rem;
+  color: var(--adm-text-subtle);
+  font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase;
+  background:
+    repeating-linear-gradient(45deg, transparent 0 12px, color-mix(in srgb, var(--adm-text) 3%, transparent) 12px 13px),
+    var(--adm-surface-2);
+}
+.ai-img__missing svg { opacity: 0.6; }
+</style>
